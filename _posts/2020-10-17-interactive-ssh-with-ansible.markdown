@@ -11,6 +11,8 @@ However, I quickly found out one single disadvantage. Ansible is not designed to
 
 My idea to solve the problem was pretty simple, because when you run Ansible Playbook, Ansible evaluates all variables and you can even print them with the [debug module](https://docs.ansible.com/ansible/latest/collections/ansible/builtin/debug_module.html), so why not just let Ansible itself generate an SSH configuration with all hosts in the inventory?
 
+**TL;DR** My full solution to this problem is an Ansible playbook in this repository [https://github.com/dmrub/ansible-ssh-scripts-creator](https://github.com/dmrub/ansible-ssh-scripts-creator).
+
 ## Evaluating Variables
 
 We will write an Ansible playbook that creates an SSH configuration as described in the Linux manpage [ssh_config](https://man7.org/linux/man-pages/man5/ssh_config.5.html). Such a configuration file can be used with the ssh command by specifying the `-F` option.
