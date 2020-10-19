@@ -37,8 +37,8 @@ As already mentioned, there are `ansible_user`, `ansible_ssh_common_args`, `ansi
 {% endhighlight %}
 
 Since we are not interested in performing any tasks on hosts and only want to evaluate variables, we [disable the fact gathering](https://docs.ansible.com/ansible/latest/user_guide/playbooks_vars_facts.html#disabling-facts) with `gather_facts: false`.
-The expression `... | default(omit)` is a filter that uses a special 
-[`omit`](https://docs.ansible.com/ansible/latest/user_guide/playbooks_filters.html#making-variables-optional) variable 
+The expression `... | default(omit)` is a filter that uses a special
+[`omit`](https://docs.ansible.com/ansible/latest/user_guide/playbooks_filters.html#making-variables-optional) variable
 and causes that if `ansible_` variable is not defined, the corresponding `eval_` variable is not defined either.
 
 When we create such a playbook, it is always useful to check after each step to make sure that we get what we expect. In this case, we can print out all evaluated variables and check if all templates have been evaluated:
@@ -96,5 +96,58 @@ All next steps should be done on the local host without using SSH, for this purp
       loop: "{{ target }}"
 {% endraw %}
 {% endhighlight %}
+
+By using the hostvars variable we can access variables that are stored on other hosts with the `set_fact` module (see [here](https://docs.ansible.com/ansible/latest/reference_appendices/special_variables.html)).
+The `loop` keyword allows us to iterate over a list of elements, in our case the expression `groups['all']`, which is the list of all hosts defined in the inventory. For each iteration, the variable `item` is set to the element of the list. Thus, the task `Print vars` prints evaluated variables for all hosts,
+but is executed on a local host.
+
+But what we need is to create an ssh configuration file and not just print values to stdout. For this task we can use an Ansible
+[`copy` module](https://docs.ansible.com/ansible/latest/collections/ansible/builtin/copy_module.html).
+Although it is primarily intended for copying files, it has a content field that allows to embed the file content directly into the playbook.
+And since Jinja templates are evaluated for all values, we can easily output our variables into the file:
+
+{% highlight yaml %}
+{% raw %}
+- hosts: "all"
+  gather_facts: false
+  tasks:
+
+    - name: Force evaluation of used host variables
+      set_fact:
+        eval_ansible_ssh_common_args: "{{ ansible_ssh_common_args | default(omit) }}"
+        eval_ansible_connection: "{{ ansible_connection | default(omit) }}"
+        eval_ansible_ssh_private_key_file: "{{ ansible_ssh_private_key_file | default(omit) }}"
+        eval_ansible_host: "{{ ansible_host | default(omit) }}"
+        eval_ansible_user: "{{ ansible_user | default(omit) }}"
+        eval_ansible_port: "{{ ansible_port | default(omit) }}"
+
+- hosts: 127.0.0.1
+  connection: local
+  gather_facts: false
+  vars:
+    target: "{{ groups['all'] }}"
+  tasks:
+
+    - name: Create output.txt file
+      copy:
+        content: |
+          {% for item in target %}
+
+          Host {{ item }}
+          ansible_ssh_common_args: {{ hostvars[item]['eval_ansible_ssh_common_args'] | default('UNDEFINED') }}
+          ansible_connection: {{ hostvars[item]['eval_ansible_connection'] | default('UNDEFINED') }}
+          ansible_ssh_private_key_file: {{ hostvars[item]['eval_ansible_ssh_private_key_file'] | default('UNDEFINED') }}
+          ansible_host: {{ hostvars[item]['eval_ansible_host'] | default('UNDEFINED')}}
+          ansible_user: {{ hostvars[item]['eval_ansible_user'] | default('UNDEFINED')}}
+          ansible_port: {{ hostvars[item]['eval_ansible_port'] | default('UNDEFINED') }}
+          {% endfor %}
+        dest: "output.txt"
+        mode: 0600
+{% endraw %}
+{% endhighlight %}
+
+Here we use a different way of iteration than in the previous example. We cannot use a `loop` because it would execute the module as many times as we have hosts, but we want to execute it only once. But in the generated text, i.e. in the template, we want to iterate over all hosts and use the variables for each host.
+To achieve this, we use the jinjas [`for loop`](https://jinja.palletsprojects.com/en/2.11.x/templates/#for)
+using the same list as in the previous example.
 
 *TO BE CONTINUED ...*
