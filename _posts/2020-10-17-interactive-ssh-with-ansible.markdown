@@ -197,4 +197,162 @@ ansible_port: UNDEFINED
 Now the next step is to use the SSH configuration file syntax, but this is where the next problem comes up: There is no option in SSH configuration file to define command line options. That means we have to convert the [SSH command line options](https://man7.org/linux/man-pages/man1/ssh.1.html) to SSH configuration file syntax.
 For example, the `-i identity_file` option to specify the private key for public key authentication should be converted to the `IdentityFile identity_file` statement in the configuration file. Doing this task with the Ansible alone would simply be too complicated, so I decided to use a simple Python script that accepts all command line arguments of the ssh command and outputs the corresponding SSH configuration statements as standard output: [ssh-args-to-config.py](https://github.com/dmrub/ansible-ssh-scripts-creator/blob/main/ssh-args-to-config.py).
 
+To execute a Python script we use [script module](https://docs.ansible.com/ansible/latest/collections/ansible/builtin/script_module.html):
+
+{% highlight yaml %}
+{% raw %}
+- hosts: 127.0.0.1
+  connection: local
+  gather_facts: false
+  vars:
+    dest_dir: "."
+    target: "{{ groups['all'] }}"
+    ansible_python_interpreter: "{{ansible_playbook_python}}"
+  tasks:
+
+    - name: Run python script with ansible interpreter
+      script: >-
+        {{ playbook_dir }}/ssh-args-to-config.py
+        --dest-dir {{ dest_dir | quote }}
+        {%if hostvars[item]['eval_ansible_ssh_common_args'] is defined %}
+        {{ hostvars[item]['eval_ansible_ssh_common_args'] }}
+        {% endif %}
+        {%if hostvars[item]['eval_ansible_ssh_private_key_file'] is defined %}
+        -i {{ hostvars[item]['eval_ansible_ssh_private_key_file'] | quote }}
+        {% endif %}
+      args:
+        executable: "{{ansible_python_interpreter}}"
+      register: ssh_config_r
+      loop: "{{ target }}"
+      ignore_errors: true
+
+
+    - name: Debug: Print ssh_config_r variable
+      debug:
+        var: ssh_config_r
+{% endraw %}
+{% endhighlight %}
+
+We set the variable `ansible_python_interpreter` to the value of `ansible_playbook_python` to use the same interpreter
+for the script that was used to execute the playbook
+(see [here](https://docs.ansible.com/ansible/latest/inventory/implicit_localhost.html)).
+The both {%raw%}`{%if ... is defined ... %} ... {% endif %}` {%endraw%}
+template expressions use  test to output value of the variables only
+if they are defined.
+The both template expressions use the [`is defined`](https://jinja.palletsprojects.com/en/2.11.x/templates/#tests) test to output the value
+of the variable only if it is defined.
+Since `eval_ansible_ssh_common_args` contains several command line arguments, we do not quote this variable when passing it to the script,
+but `eval_ansible_ssh_private_key_file` is a file name and a single parameter that can contain spaces, so we apply a quote filter to it.
+Since SSH options use file names, we provide the variable `dest_dir` as the directory where the configuration file should be created and
+to resolve all paths relative to it.
+We execute the script for all hosts specified in the `target` variable using the `loop` keyword and store the results in
+the variable `ssh_config_r`. If errors occur during execution, we ignore them with [`ignore_errors: true`](https://docs.ansible.com/ansible/latest/user_guide/playbooks_error_handling.html#ignoring-failed-commands) statement.
+
+If we run playbook with the above mentioned inventory, the last debug task should be output afterwards:
+
+```
+ok: [127.0.0.1] => {
+    "ssh_config_r": {
+        "changed": true,
+        "msg": "All items completed",
+        "results": [
+            {
+                "ansible_loop_var": "item",
+                "changed": true,
+                "failed": false,
+                "item": "my_host_1",
+                "rc": 0,
+                "stderr": "",
+                "stderr_lines": [],
+                "stdout": "ProxyCommand=ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -W %h:%p user@example.org -p 2222 -i my_id_rsa \nIdentityFile /home/rubinste/Kubernetes/ClusterManager/ansible-test/my_id_rsa\n",
+                "stdout_lines": [
+                    "ProxyCommand=ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -W %h:%p user@example.org -p 2222 -i my_id_rsa ",
+                    "IdentityFile /home/rubinste/Kubernetes/ClusterManager/ansible-test/my_id_rsa"
+                ]
+            },
+            {
+                "ansible_loop_var": "item",
+                "changed": true,
+                "failed": false,
+                "item": "my_host_2",
+                "rc": 0,
+                "stderr": "",
+                "stderr_lines": [],
+                "stdout": "ProxyCommand=ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -W %h:%p user@example.org -p 2222 -i my_id_rsa \nIdentityFile /home/rubinste/Kubernetes/ClusterManager/ansible-test/my_id_rsa\n",
+                "stdout_lines": [
+                    "ProxyCommand=ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -W %h:%p user@example.org -p 2222 -i my_id_rsa ",
+                    "IdentityFile /home/rubinste/Kubernetes/ClusterManager/ansible-test/my_id_rsa"
+                ]
+            }
+        ]
+    }
+}
+```
+
+## Reorganization of data
+
+The next complication is that we iterate over a list of hostnames when generating our output file,
+but the results of the script are organized as a `results` list in the variable `ssh_config_r` and are indexable by a numeric index.
+To keep the file generation simple, we should reorganize the data so that we can keep our iteration.
+We just have to create a new variable with the module `set_fact` that maps the hostname to the data,
+in our case stdout, that we have to create:
+
+{% highlight yaml %}
+{% raw %}
+    - name: Populate ssh config
+      set_fact:
+        ssh_config: >-
+          {{ ssh_config | default({}) |
+             combine( {item.item:
+                         item.stdout if item.rc == 0 else
+                         '# Script could not generate configuration for host %s, check ansible_ssh_common_args variable' | format(item.item)
+                      }
+                    )
+          }}
+      loop: "{{ ssh_config_r.results }}"
+{% endraw %}
+{% endhighlight %}
+
+In the task `Populate ssh config` we create `ssh_config` dictionary by adding mappings from each hostname (`item.item`) to stdout (`item.stdout`) if the script for the host was executed successfully (`item.rc == 0`). If the script was not successful, we add an error message as comment `#`.
+The expression `ssh_config | default({})` creates an empty dictionary in the first step because the variable ssh_config is not defined at
+the beginning of the loop via the result list `ssh_config_r.results`.
+
+## Output of ssh-config file
+
+Now we are finally able to create an SSH configuration file:
+
+{% highlight yaml %}
+{% raw %}
+    - name: Create ssh config file in ssh-config
+      copy:
+        content: |
+          {% for host in target %}
+          {% if hostvars[host]['eval_ansible_connection'] | default('ssh', true) in ['ssh', 'network_cli'] %}
+          {% set ansible_host = hostvars[host]['eval_ansible_host'] %}
+          {% set ansible_user = hostvars[host]['eval_ansible_user'] %}
+          {% set ansible_port = hostvars[host]['eval_ansible_port'] | default(22, true) %}
+
+          Host {{ host }}
+            HostName {{ ansible_host }}
+            User {{ ansible_user }}
+            Port {{ ansible_port }}
+            UserKnownHostsFile /dev/null
+            StrictHostKeyChecking no
+            PasswordAuthentication yes
+            {# Note: IdentityFile option is output by ssh-args-to-config.py script #}
+            {% if ssh_config[host] is defined %}
+
+            # Options extracted from ssh command line arguments :
+            {{ ssh_config[host] | indent(width=2) }}
+            {% endif %}
+            {% endif %}
+          {% endfor %}
+        dest: "{{ dest_dir }}/ssh-config"
+        mode: 0600
+{% endraw %}
+{% endhighlight %}
+
+We use the `set` statement to reduce the writing effort.  Since `ansible_port` can be undefined, we use 22 as default value.
+The [`indent` filter](https://jinja.palletsprojects.com/en/2.11.x/templates/#indent) is used for a nicer formatting of the output.
+
 *TO BE CONTINUED ...*
