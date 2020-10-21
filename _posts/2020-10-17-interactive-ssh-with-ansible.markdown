@@ -57,7 +57,7 @@ When we create such a playbook, it is always useful to check after each step to 
 {% endraw %}
 {% endhighlight %}
 
-## Generating the SSH configuration
+## Writing to a file
 
 All next steps should be done on the local host without using SSH, for this purpose Ansible supports the [local connection](https://docs.ansible.com/ansible/latest/user_guide/playbooks_delegation.html#local-playbooks):
 
@@ -149,5 +149,52 @@ And since Jinja templates are evaluated for all values, we can easily output our
 Here we use a different way of iteration than in the previous example. We cannot use a `loop` because it would execute the module as many times as we have hosts, but we want to execute it only once. But in the generated text, i.e. in the template, we want to iterate over all hosts and use the variables for each host.
 To achieve this, we use the jinjas [`for loop`](https://jinja.palletsprojects.com/en/2.11.x/templates/#for)
 using the same list as in the previous example.
+
+Let's run our playbook with the following inventory and see what we get in the file `output.txt`:
+
+{% highlight yaml %}
+{% raw %}
+---
+all:
+  children:
+    my_group:
+      hosts:
+        my_host_1:
+          ansible_ssh_common_args: '{{ hostvars[node_ref].ansible_ssh_common_args | default(omit) }}'
+        my_host_2:
+          ansible_ssh_common_args: >-
+            -o ProxyCommand='ssh -o UserKnownHostsFile=/dev/null
+            -o StrictHostKeyChecking=no -W %h:%p user@example.org -p 2222
+            -i my_id_rsa '
+      vars:
+        node_ref: my_host_2
+        ansible_user: my_user
+        ansible_ssh_private_key_file: my_id_rsa
+{% endraw %}
+{% endhighlight %}
+
+If we run our playbook with this inventory, we get the following text in the `output.txt`:
+```
+Host my_host_1
+ansible_ssh_common_args: -o ProxyCommand='ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -W %h:%p user@example.org -p 2222 -i my_id_rsa '
+ansible_connection: ssh
+ansible_ssh_private_key_file: my_id_rsa
+ansible_host: my_host_1
+ansible_user: my_user
+ansible_port: UNDEFINED
+
+Host my_host_2
+ansible_ssh_common_args: -o ProxyCommand='ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -W %h:%p user@example.org -p 2222 -i my_id_rsa '
+ansible_connection: ssh
+ansible_ssh_private_key_file: my_id_rsa
+ansible_host: my_host_2
+ansible_user: my_user
+ansible_port: UNDEFINED
+```
+
+## Generating the SSH configuration
+
+Now the next step is to use the SSH configuration file syntax, but this is where the next problem comes up: There is no option in SSH configuration file to define command line options. That means we have to convert the [SSH command line options](https://man7.org/linux/man-pages/man1/ssh.1.html) to SSH configuration file syntax.
+For example, the `-i identity_file` option to specify the private key for public key authentication should be converted to the `IdentityFile identity_file` statement in the configuration file. Doing this task with the Ansible alone would simply be too complicated, so I decided to use a simple Python script that accepts all command line arguments of the ssh command and outputs the corresponding SSH configuration statements as standard output: [ssh-args-to-config.py](https://github.com/dmrub/ansible-ssh-scripts-creator/blob/main/ssh-args-to-config.py).
 
 *TO BE CONTINUED ...*
